@@ -1,0 +1,53 @@
+```
+# Dependencies
+/vendor/
+/node_modules/
+
+# Environment
+.env
+.env.local
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Compiled and build artifacts
+*.phpc
+*.class
+*.o
+*.obj
+*.out
+build/
+dist/
+target/
+
+# Cache
+/cache/
+bootstrap/cache/
+/storage/
+!/storage/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage/
+htmlcov/
+.coverage
+
+# PHP specific
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.php_cs.cache
+```
