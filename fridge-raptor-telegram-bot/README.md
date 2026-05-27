@@ -1,58 +1,194 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Telegram Bot Service for Recipe Generation
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Laravel-based Telegram bot that interacts with users and calls the Core Service API to generate recipes using AI.
 
-## About Laravel
+## Architecture
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+- **Laravel 10+** - Backend framework
+- **Redis** - Queue backend and FSM state storage
+- **Telegram Bot SDK** - Telegram API integration
+- **Guzzle HTTP** - Core API client
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+## Installation
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
-
-## Learning Laravel
-
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
-
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
-
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
-
-## Agentic Development
-
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
+### 1. Clone and Install Dependencies
 
 ```bash
-composer require laravel/boost --dev
-
-php artisan boost:install
+composer install
+npm install
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+### 2. Environment Configuration
 
-## Contributing
+Copy `.env.example` to `.env` and configure:
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+```env
+# Application
+APP_NAME="Recipe Bot"
+APP_ENV=production
+APP_DEBUG=false
+APP_URL=https://your-domain.com
 
-## Code of Conduct
+# Database
+DB_CONNECTION=pgsql
+DB_HOST=localhost
+DB_PORT=5432
+DB_DATABASE=fridge_raptor_telegram_bot
+DB_USERNAME=your_user
+DB_PASSWORD=your_password
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+# Redis (required for queues and FSM)
+REDIS_HOST=127.0.0.1
+REDIS_PASSWORD=null
+REDIS_PORT=6379
+QUEUE_CONNECTION=redis
 
-## Security Vulnerabilities
+# Telegram Bot
+TELEGRAM_BOT_TOKEN=your_bot_token_from_botfather
+TELEGRAM_WEBHOOK_URL=https://your-domain.com/webhook/telegram
+TELEGRAM_WEBHOOK_SECRET=your_secret_key
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+# Core Service API
+CORE_API_BASE_URL=http://localhost:8000/api/v1
+CORE_API_KEY=your_api_key
+```
+
+Generate application key:
+```bash
+php artisan key:generate
+```
+
+### 3. Database Setup
+
+```bash
+php artisan migrate
+```
+
+### 4. Queue Worker
+
+Start the queue worker to process recipe generation jobs:
+
+```bash
+php artisan queue:work --tries=3
+```
+
+For production, use supervisor to keep the worker running:
+
+```ini
+[program:laravel-worker]
+process_name=%(program_name)s_%(process_num)02d
+command=php /path/to/app/artisan queue:work redis --sleep=3 --tries=3 --max-time=3600
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+user=www-data
+numprocs=2
+redirect_stderr=true
+stdout_logfile=/path/to/app/storage/logs/worker.log
+stopwaitsecs=3600
+```
+
+### 5. Set Telegram Webhook
+
+```bash
+php artisan telegram:set-webhook
+```
+
+Or with custom URL:
+```bash
+php artisan telegram:set-webhook --url=https://your-domain.com/webhook/telegram
+```
+
+## Usage
+
+### Bot Commands
+
+- `/start` - Start conversation and welcome message
+- `/help` - Show help information
+- `/history` - View recipe history with pagination
+- `/cancel` - Cancel current order
+
+### Conversation Flow
+
+1. **User sends ingredients** (e.g., "картофель, курица, лук")
+2. **Bot asks for preferences** (time, difficulty, dietary restrictions)
+3. **User specifies preferences** or says "готовь" for defaults
+4. **Bot generates recipe** via Core API (async job)
+5. **Bot sends formatted recipe** in Markdown
+
+### State Machine (FSM)
+
+The bot uses a finite state machine stored in Redis:
+
+- `idle` - No active conversation
+- `waiting_ingredients` - Waiting for ingredient list
+- `clarifying_parameters` - Asking for cooking preferences
+- `viewing_recipe` - Recipe generation in progress
+
+States are automatically managed by `UserStateManager` service.
+
+## Project Structure
+
+```
+app/
+├── Console/Commands/
+│   └── SetTelegramWebhookCommand.php
+├── Http/Controllers/
+│   └── TelegramWebhookController.php
+├── Jobs/
+│   └── GenerateRecipeJob.php
+├── Services/
+│   ├── CoreApiClient.php      # HTTP client for Core API
+│   ├── TelegramFormatter.php  # Message formatting (JSON → Markdown)
+│   └── UserStateManager.php   # FSM state management in Redis
+```
+
+## API Integration
+
+### Core Service Endpoints
+
+- `POST /api/v1/recipes/generate` - Generate new recipe
+- `GET /api/v1/recipes/history` - Get user's recipe history
+- `GET /api/v1/recipes/{id}` - Get recipe details
+- `DELETE /api/v1/recipes/{id}` - Delete recipe
+
+Authentication: `X-API-Key` header
+
+## Development
+
+### Running Locally
+
+1. Start Laravel development server:
+```bash
+php artisan serve
+```
+
+2. Use ngrok for webhook testing:
+```bash
+ngrok http 8000
+```
+
+3. Update TELEGRAM_WEBHOOK_URL with ngrok URL
+
+### Testing
+
+```bash
+php artisan test
+```
+
+## Error Handling
+
+- All API errors are logged to Laravel log
+- Users receive friendly error messages
+- Failed jobs are retried up to 3 times with exponential backoff
+
+## Security
+
+- Webhook secret validation (optional)
+- API key stored in environment variables
+- User states expire after 24 hours
 
 ## License
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+MIT License
