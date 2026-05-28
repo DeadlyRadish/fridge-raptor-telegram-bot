@@ -1,0 +1,61 @@
+services:
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram-bot
+    env_file:
+      - .env
+    environment:
+      APP_ENV: local
+      APP_DEBUG: "true"
+      APP_URL: http://localhost:8080
+      CORE_API_BASE_URL: http://host.docker.internal:8000
+      PRODUCTS_API_BASE_URL: http://products-mock:8090
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      QUEUE_CONNECTION: redis
+      CACHE_STORE: redis
+      SESSION_DRIVER: file
+    depends_on:
+      - redis
+      - products-mock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["php", "artisan", "telegram:poll", "--timeout=25", "--sleep=1", "--drop-pending-updates"]
+
+  queue-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram-bot-worker
+    env_file:
+      - .env
+    environment:
+      CORE_API_BASE_URL: http://host.docker.internal:8000
+      PRODUCTS_API_BASE_URL: http://products-mock:8090
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      QUEUE_CONNECTION: redis
+      CACHE_STORE: redis
+      SESSION_DRIVER: file
+    depends_on:
+      - redis
+      - products-mock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["php", "artisan", "queue:work", "--tries=3"]
+
+  redis:
+    image: redis:7-alpine
+    container_name: telegram-bot-redis
+    ports:
+      - "6379:6379"
+
+  products-mock:
+    build:
+      context: ./products-mock
+      dockerfile: Dockerfile
+    container_name: products-mock
+    ports:
+      - "8090:8090"

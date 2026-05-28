@@ -6,13 +6,14 @@ namespace App\Jobs;
 
 use App\Services\CoreApiClient;
 use App\Services\TelegramFormatter;
+use App\Services\UserStateManager;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Telegram\Bot\Api as TelegramApi;
 use Illuminate\Support\Facades\Log;
+use Telegram\Bot\Api as TelegramApi;
 
 /**
  * Задача для асинхронной генерации рецепта через Core API
@@ -20,6 +21,11 @@ use Illuminate\Support\Facades\Log;
 class GenerateRecipeJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+    /**
+     * @var int Идентификатор чата Telegram
+     */
+    private int $chatId;
 
     /**
      * @var string Идентификатор пользователя Telegram
@@ -49,15 +55,17 @@ class GenerateRecipeJob implements ShouldQueue
     /**
      * Создание нового экземпляра задачи
      *
-     * @param string $userId Идентификатор пользователя
-     * @param array $ingredients Список ингредиентов
-     * @param array $preferences Предпочтения пользователя
+     * @param  string  $userId  Идентификатор пользователя
+     * @param  array  $ingredients  Список ингредиентов
+     * @param  array  $preferences  Предпочтения пользователя
      */
     public function __construct(
+        int $chatId,
         string $userId,
         array $ingredients,
         array $preferences = []
     ) {
+        $this->chatId = $chatId;
         $this->userId = $userId;
         $this->ingredients = $ingredients;
         $this->preferences = $preferences;
@@ -66,14 +74,15 @@ class GenerateRecipeJob implements ShouldQueue
     /**
      * Выполнение задачи
      *
-     * @param CoreApiClient $apiClient Внедряется через контейнер
-     * @param TelegramFormatter $formatter Внедряется через контейнер
-     * @param TelegramApi $telegram Внедряется через контейнер
+     * @param  CoreApiClient  $apiClient  Внедряется через контейнер
+     * @param  TelegramFormatter  $formatter  Внедряется через контейнер
+     * @param  TelegramApi  $telegram  Внедряется через контейнер
      */
     public function handle(
         CoreApiClient $apiClient,
         TelegramFormatter $formatter,
-        TelegramApi $telegram
+        TelegramApi $telegram,
+        UserStateManager $stateManager
     ): void {
         try {
             Log::info("Генерация рецепта для пользователя {$this->userId}", [
@@ -85,7 +94,7 @@ class GenerateRecipeJob implements ShouldQueue
             $recipe = $apiClient->generateRecipe(
                 $this->ingredients,
                 $this->preferences,
-                "tg_{$this->userId}"
+                (int) $this->userId
             );
 
             // Форматирование ответа
@@ -93,13 +102,15 @@ class GenerateRecipeJob implements ShouldQueue
 
             // Отправка пользователю
             $telegram->sendMessage([
-                'chat_id' => $this->userId,
+                'chat_id' => $this->chatId,
                 'text' => $message,
                 'parse_mode' => 'Markdown',
             ]);
 
+            $stateManager->setState($this->userId, UserStateManager::STATE_IDLE);
+
             Log::info("Рецепт успешно отправлен пользователю {$this->userId}", [
-                'recipe_id' => $recipe['recipe_id'] ?? null,
+                'recipe_id' => $recipe['id'] ?? null,
             ]);
 
         } catch (\Exception $e) {
@@ -110,11 +121,10 @@ class GenerateRecipeJob implements ShouldQueue
 
             // Уведомление пользователя об ошибке
             $telegram->sendMessage([
-                'chat_id' => $this->userId,
-                'text' => "*😕 Ошибка при генерации рецепта*\n\n" .
-                    "К сожалению, не удалось создать рецепт.\n" .
-                    "Попробуйте еще раз или измените ингредиенты.\n\n" .
-                    "_Детали: {$e->getMessage()}_",
+                'chat_id' => $this->chatId,
+                'text' => "*😕 Ошибка при генерации рецепта*\n\n".
+                    "К сожалению, не удалось создать рецепт.\n".
+                    'Попробуйте еще раз или измените ингредиенты.',
                 'parse_mode' => 'Markdown',
             ]);
 
@@ -125,12 +135,10 @@ class GenerateRecipeJob implements ShouldQueue
 
     /**
      * Обработка неудачного выполнения задачи
-     *
-     * @param \Throwable $exception
      */
     public function failed(\Throwable $exception): void
     {
-        Log::critical("Задача генерации рецепта полностью провалена", [
+        Log::critical('Задача генерации рецепта полностью провалена', [
             'user_id' => $this->userId,
             'error' => $exception->getMessage(),
         ]);

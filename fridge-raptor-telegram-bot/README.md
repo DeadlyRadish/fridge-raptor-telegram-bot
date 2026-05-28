@@ -1,194 +1,146 @@
-# Telegram Bot Service for Recipe Generation
+# Fridge Raptor Telegram Bot
 
-Laravel-based Telegram bot that interacts with users and calls the Core Service API to generate recipes using AI.
+Telegram-бот для генерации рецептов из продуктов.  
+Проект работает только в режиме **long polling** (без webhook и без публичного HTTPS).
 
-## Architecture
+## Что внутри
 
-- **Laravel 10+** - Backend framework
-- **Redis** - Queue backend and FSM state storage
-- **Telegram Bot SDK** - Telegram API integration
-- **Guzzle HTTP** - Core API client
+- `telegram-bot` (Laravel): логика бота, FSM, интеграция с Core API.
+- `queue-worker` (Laravel): асинхронная генерация рецептов.
+- `redis`: хранение очереди и состояния пользователя.
+- `products-mock` (Node.js): mock-хранилище продуктов.
 
-## Installation
+## Архитектура взаимодействия
 
-### 1. Clone and Install Dependencies
+1. Пользователь пишет боту в Telegram.
+2. `telegram-bot` делает `getUpdates` (long polling) и получает сообщения.
+3. Бот получает продукты:
+   - либо из сообщения пользователя,
+   - либо из `products-mock` по команде `/cook`.
+4. `queue-worker` вызывает Core API (`POST /api/v1/recipes`).
+5. Результат форматируется и отправляется обратно в Telegram.
+
+## Поддерживаемые внешние API
+
+### Core Service (`CORE_API_BASE_URL`)
+
+- `GET /api/health`
+- `POST /api/v1/recipes`
+- `GET /api/v1/recipes`
+- `DELETE /api/v1/recipes/{id}`
+
+### Products Mock (`PRODUCTS_API_BASE_URL`)
+
+- `GET /health`
+- `GET /api/v1/products?user_id=...`
+- `POST /api/v1/products`
+- `DELETE /api/v1/products/{id}`
+
+## Быстрый старт (рекомендуется)
+
+### 1) Подготовьте `.env`
+
+Скопируйте пример:
 
 ```bash
-composer install
-npm install
+cp .env.example .env
 ```
 
-### 2. Environment Configuration
-
-Copy `.env.example` to `.env` and configure:
+Минимально заполните:
 
 ```env
-# Application
-APP_NAME="Recipe Bot"
-APP_ENV=production
-APP_DEBUG=false
-APP_URL=https://your-domain.com
+APP_ENV=local
+APP_DEBUG=true
+APP_URL=http://localhost
 
-# Database
-DB_CONNECTION=pgsql
-DB_HOST=localhost
-DB_PORT=5432
-DB_DATABASE=fridge_raptor_telegram_bot
-DB_USERNAME=your_user
-DB_PASSWORD=your_password
-
-# Redis (required for queues and FSM)
-REDIS_HOST=127.0.0.1
-REDIS_PASSWORD=null
-REDIS_PORT=6379
-QUEUE_CONNECTION=redis
-
-# Telegram Bot
 TELEGRAM_BOT_TOKEN=your_bot_token_from_botfather
-TELEGRAM_WEBHOOK_URL=https://your-domain.com/webhook/telegram
-TELEGRAM_WEBHOOK_SECRET=your_secret_key
 
-# Core Service API
-CORE_API_BASE_URL=http://localhost:8000/api/v1
-CORE_API_KEY=your_api_key
+CORE_API_BASE_URL=http://host.docker.internal:8000
+PRODUCTS_API_BASE_URL=http://products-mock:8090
+
+QUEUE_CONNECTION=redis
+REDIS_HOST=redis
+REDIS_PORT=6379
 ```
 
-Generate application key:
-```bash
-php artisan key:generate
-```
+> `CORE_API_BASE_URL` указывает на ваш локальный контейнер/сервис генерации рецептов.
 
-### 3. Database Setup
+### 2) Запустите проект
 
 ```bash
-php artisan migrate
+docker compose up --build
 ```
 
-### 4. Queue Worker
+Поднимутся сервисы:
 
-Start the queue worker to process recipe generation jobs:
+- `telegram-bot` (polling-цикл)
+- `queue-worker`
+- `redis`
+- `products-mock`
+
+### 3) Проверьте, что mock продуктов жив
 
 ```bash
-php artisan queue:work --tries=3
+curl http://localhost:8090/health
 ```
 
-For production, use supervisor to keep the worker running:
+## Команды бота
 
-```ini
-[program:laravel-worker]
-process_name=%(program_name)s_%(process_num)02d
-command=php /path/to/app/artisan queue:work redis --sleep=3 --tries=3 --max-time=3600
-autostart=true
-autorestart=true
-stopasgroup=true
-killasgroup=true
-user=www-data
-numprocs=2
-redirect_stderr=true
-stdout_logfile=/path/to/app/storage/logs/worker.log
-stopwaitsecs=3600
-```
+- `/start` - приветствие и старт диалога
+- `/help` - справка
+- `/history` - история рецептов (берется из `GET /api/v1/recipes`)
+- `/products` - показать продукты из mock-сервиса
+- `/cook` - готовить по продуктам из mock-сервиса
+- `/cancel` - сброс текущего сценария
 
-### 5. Set Telegram Webhook
+## Формат ввода продуктов вручную
+
+Можно отправлять:
+
+- `картошка, лук, морковь`
+- `свинина 500 г, лук 2 шт`
+
+Если количество не указано, по умолчанию ставится `1 шт`.
+
+## Управление mock-сервисом продуктов
+
+Добавить продукт:
 
 ```bash
-php artisan telegram:set-webhook
+curl -X POST http://localhost:8090/api/v1/products \
+  -H "Content-Type: application/json" \
+  -d "{\"user_id\":123456,\"name\":\"осьминог\",\"quantity\":100,\"unit\":\"г\"}"
 ```
 
-Or with custom URL:
-```bash
-php artisan telegram:set-webhook --url=https://your-domain.com/webhook/telegram
-```
-
-## Usage
-
-### Bot Commands
-
-- `/start` - Start conversation and welcome message
-- `/help` - Show help information
-- `/history` - View recipe history with pagination
-- `/cancel` - Cancel current order
-
-### Conversation Flow
-
-1. **User sends ingredients** (e.g., "картофель, курица, лук")
-2. **Bot asks for preferences** (time, difficulty, dietary restrictions)
-3. **User specifies preferences** or says "готовь" for defaults
-4. **Bot generates recipe** via Core API (async job)
-5. **Bot sends formatted recipe** in Markdown
-
-### State Machine (FSM)
-
-The bot uses a finite state machine stored in Redis:
-
-- `idle` - No active conversation
-- `waiting_ingredients` - Waiting for ingredient list
-- `clarifying_parameters` - Asking for cooking preferences
-- `viewing_recipe` - Recipe generation in progress
-
-States are automatically managed by `UserStateManager` service.
-
-## Project Structure
-
-```
-app/
-├── Console/Commands/
-│   └── SetTelegramWebhookCommand.php
-├── Http/Controllers/
-│   └── TelegramWebhookController.php
-├── Jobs/
-│   └── GenerateRecipeJob.php
-├── Services/
-│   ├── CoreApiClient.php      # HTTP client for Core API
-│   ├── TelegramFormatter.php  # Message formatting (JSON → Markdown)
-│   └── UserStateManager.php   # FSM state management in Redis
-```
-
-## API Integration
-
-### Core Service Endpoints
-
-- `POST /api/v1/recipes/generate` - Generate new recipe
-- `GET /api/v1/recipes/history` - Get user's recipe history
-- `GET /api/v1/recipes/{id}` - Get recipe details
-- `DELETE /api/v1/recipes/{id}` - Delete recipe
-
-Authentication: `X-API-Key` header
-
-## Development
-
-### Running Locally
-
-1. Start Laravel development server:
-```bash
-php artisan serve
-```
-
-2. Use ngrok for webhook testing:
-```bash
-ngrok http 8000
-```
-
-3. Update TELEGRAM_WEBHOOK_URL with ngrok URL
-
-### Testing
+Получить продукты пользователя:
 
 ```bash
-php artisan test
+curl "http://localhost:8090/api/v1/products?user_id=123456"
 ```
 
-## Error Handling
+Удалить продукт:
 
-- All API errors are logged to Laravel log
-- Users receive friendly error messages
-- Failed jobs are retried up to 3 times with exponential backoff
+```bash
+curl -X DELETE http://localhost:8090/api/v1/products/1001
+```
 
-## Security
+## Локальная разработка без Docker (опционально)
 
-- Webhook secret validation (optional)
-- API key stored in environment variables
-- User states expire after 24 hours
+1. `composer install`
+2. `cp .env.example .env`
+3. `php artisan key:generate`
+4. Поднимите Redis локально
+5. Запустите воркер: `php artisan queue:work --tries=3`
+6. Запустите polling: `php artisan telegram:poll --timeout=25 --sleep=1`
+7. Отдельно запустите `products-mock` (`npm install && npm run start` в `products-mock`)
 
-## License
+## Отладка
 
-MIT License
+- Логи Laravel: `storage/logs/laravel.log`
+- Проверка, что polling активен: смотрите логи контейнера `telegram-bot`
+- Проверка очереди: логи контейнера `queue-worker`
+
+## Важное ограничение
+
+Проект intentionally работает в одном режиме запуска: **long polling**.  
+Webhook-путь и публичный HTTPS для локальной разработки не используются.

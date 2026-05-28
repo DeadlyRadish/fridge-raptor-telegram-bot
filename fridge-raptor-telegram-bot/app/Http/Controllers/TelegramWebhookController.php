@@ -6,14 +6,17 @@ namespace App\Http\Controllers;
 
 use App\Jobs\GenerateRecipeJob;
 use App\Services\CoreApiClient;
+use App\Services\ProductsApiClient;
 use App\Services\TelegramFormatter;
 use App\Services\UserStateManager;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use InvalidArgumentException;
 use Telegram\Bot\Api as TelegramApi;
 use Telegram\Bot\Exceptions\TelegramSDKException;
-use InvalidArgumentException;
+use Telegram\Bot\Objects\MessageEntity;
+use Telegram\Bot\Objects\Update;
 
 /**
  * Контроллер для обработки webhook от Telegram Bot API
@@ -40,12 +43,10 @@ class TelegramWebhookController extends Controller
      */
     private ?CoreApiClient $apiClient = null;
 
+    private ?ProductsApiClient $productsApiClient = null;
+
     /**
      * Конструктор контроллера
-     *
-     * @param TelegramApi $telegram
-     * @param UserStateManager $stateManager
-     * @param TelegramFormatter $formatter
      */
     public function __construct(
         TelegramApi $telegram,
@@ -59,15 +60,15 @@ class TelegramWebhookController extends Controller
 
     /**
      * Обработка входящего webhook от Telegram
-     *
-     * @param Request $request
-     * @return JsonResponse
      */
     public function handle(Request $request): JsonResponse
     {
         try {
-            $update = $this->telegram->getWebhookUpdate();
-            
+            $payload = $request->all();
+            $update = $payload !== []
+                ? new Update($payload)
+                : $this->telegram->getWebhookUpdate();
+
             Log::info('Получен webhook от Telegram', [
                 'update_id' => $update->getId(),
             ]);
@@ -80,7 +81,7 @@ class TelegramWebhookController extends Controller
             // Обработка команд
             if ($update->hasMessage() && $update->getMessage()->hasEntities()) {
                 $entities = $update->getMessage()->getEntities();
-                
+
                 foreach ($entities as $entity) {
                     if ($entity->getType() === 'bot_command') {
                         return $this->handleCommand($update, $entity);
@@ -125,9 +126,8 @@ class TelegramWebhookController extends Controller
     /**
      * Обработка команд бота
      *
-     * @param \Telegram\Bot\Objects\Update $update
-     * @param \Telegram\Bot\Objects\MessageEntity $entity
-     * @return JsonResponse
+     * @param  Update  $update
+     * @param  MessageEntity  $entity
      */
     private function handleCommand($update, $entity): JsonResponse
     {
@@ -135,14 +135,14 @@ class TelegramWebhookController extends Controller
         $chatId = $message->getChat()->getId();
         $userId = (string) $message->getFrom()->getId();
         $userName = $message->getFrom()->getFirstName();
-        
+
         // Получаем текст команды
         $commandText = mb_substr(
             $message->getText(),
             $entity->getOffset(),
             $entity->getLength()
         );
-        
+
         $command = strtolower(str_replace('/', '', $commandText));
 
         Log::info("Команда {$command} от пользователя {$userId}");
@@ -152,6 +152,8 @@ class TelegramWebhookController extends Controller
             'help' => $this->handleHelpCommand($chatId),
             'history' => $this->handleHistoryCommand($chatId, $userId),
             'cancel' => $this->handleCancelCommand($chatId, $userId),
+            'products' => $this->handleProductsCommand($chatId, $userId),
+            'cook' => $this->handleCookFromProductsCommand($chatId, $userId),
             default => response()->json(['success' => true]),
         };
     }
@@ -159,8 +161,7 @@ class TelegramWebhookController extends Controller
     /**
      * Обработка текстовых сообщений
      *
-     * @param \Telegram\Bot\Objects\Update $update
-     * @return JsonResponse
+     * @param  Update  $update
      */
     private function handleTextMessage($update): JsonResponse
     {
@@ -176,22 +177,18 @@ class TelegramWebhookController extends Controller
 
         // Обработка в зависимости от состояния
         return match ($state['state']) {
-            UserStateManager::STATE_WAITING_INGREDIENTS => 
-                $this->handleIngredientsInput($chatId, $userId, $text),
-            
-            UserStateManager::STATE_CLARIFYING_PARAMETERS => 
-                $this->handleParametersInput($chatId, $userId, $text),
-            
-            default => 
-                $this->handleDefaultMessage($chatId, $userId, $text),
+            UserStateManager::STATE_WAITING_INGREDIENTS => $this->handleIngredientsInput($chatId, $userId, $text),
+
+            UserStateManager::STATE_CLARIFYING_PARAMETERS => $this->handleParametersInput($chatId, $userId, $text),
+
+            default => $this->handleDefaultMessage($chatId, $userId, $text),
         };
     }
 
     /**
      * Обработка callback query от инлайн-кнопок
      *
-     * @param \Telegram\Bot\Objects\Update $update
-     * @return JsonResponse
+     * @param  Update  $update
      */
     private function handleCallbackQuery($update): JsonResponse
     {
@@ -203,12 +200,12 @@ class TelegramWebhookController extends Controller
         Log::info("Callback query от {$userId}: {$data}");
 
         // Парсинг данных callback
-        [$action, $param] = explode(':', $data . ':');
+        [$action, $param] = explode(':', $data.':');
 
         return match ($action) {
             'history_page' => $this->handleHistoryPagination(
-                $chatId, 
-                $userId, 
+                $chatId,
+                $userId,
                 (int) $param
             ),
             'recipe_action' => $this->handleRecipeAction(
@@ -262,17 +259,18 @@ class TelegramWebhookController extends Controller
     {
         try {
             $apiClient = $this->getApiClient();
-            
-            $result = $apiClient->getRecipeHistory("tg_{$userId}", $page, 5);
-            
-            $message = $this->formatter->formatRecipeHistory(
-                $result['recipes'],
-                $page,
-                $result['pagination']['total_pages'] ?? 1
-            );
+            $allRecipes = $apiClient->getRecipes();
+            $filteredRecipes = array_values(array_filter(
+                $allRecipes,
+                static fn (array $recipe): bool => (int) ($recipe['user_id'] ?? 0) === (int) $userId
+            ));
+            $perPage = 5;
+            $totalPages = max(1, (int) ceil(count($filteredRecipes) / $perPage));
+            $currentPage = min(max($page, 1), $totalPages);
+            $recipes = array_slice($filteredRecipes, ($currentPage - 1) * $perPage, $perPage);
 
-            // Инлайн-кнопки для пагинации
-            $keyboard = $this->createHistoryKeyboard($page, $result['pagination']['total_pages'] ?? 1);
+            $message = $this->formatter->formatRecipeHistory($recipes, $currentPage, $totalPages);
+            $keyboard = $this->createHistoryKeyboard($currentPage, $totalPages);
 
             $this->telegram->sendMessage([
                 'chat_id' => $chatId,
@@ -312,6 +310,68 @@ class TelegramWebhookController extends Controller
         return response()->json(['success' => true]);
     }
 
+    private function handleProductsCommand(int $chatId, string $userId): JsonResponse
+    {
+        try {
+            $products = $this->getProductsApiClient()->getProducts((int) $userId);
+            $message = $this->formatter->formatProducts($products);
+        } catch (\Throwable $e) {
+            Log::error("Ошибка загрузки продуктов для {$userId}", [
+                'error' => $e->getMessage(),
+            ]);
+            $message = "*😕 Ошибка*\n\nНе удалось получить продукты из mock-сервиса.";
+        }
+
+        $this->telegram->sendMessage([
+            'chat_id' => $chatId,
+            'text' => $message,
+            'parse_mode' => 'Markdown',
+        ]);
+
+        return response()->json(['success' => true]);
+    }
+
+    private function handleCookFromProductsCommand(int $chatId, string $userId): JsonResponse
+    {
+        try {
+            $products = $this->getProductsApiClient()->getProducts((int) $userId);
+        } catch (\Throwable $e) {
+            Log::error("Ошибка команды /cook для {$userId}", [
+                'error' => $e->getMessage(),
+            ]);
+
+            $this->telegram->sendMessage([
+                'chat_id' => $chatId,
+                'text' => "*😕 Ошибка*\n\nНе удалось получить продукты из mock-сервиса.",
+                'parse_mode' => 'Markdown',
+            ]);
+
+            return response()->json(['success' => true]);
+        }
+
+        if ($products === []) {
+            $this->telegram->sendMessage([
+                'chat_id' => $chatId,
+                'text' => "*📦 Список пуст*\n\nВ хранилище нет продуктов. Добавьте их и повторите /cook.",
+                'parse_mode' => 'Markdown',
+            ]);
+
+            return response()->json(['success' => true]);
+        }
+
+        $this->stateManager->setState($userId, UserStateManager::STATE_CLARIFYING_PARAMETERS, [
+            'ingredients' => $products,
+        ]);
+
+        $this->telegram->sendMessage([
+            'chat_id' => $chatId,
+            'text' => $this->formatter->formatParametersQuestion($products),
+            'parse_mode' => 'Markdown',
+        ]);
+
+        return response()->json(['success' => true]);
+    }
+
     /**
      * Обработка ввода ингредиентов (состояние WAITING_INGREDIENTS)
      */
@@ -320,7 +380,7 @@ class TelegramWebhookController extends Controller
         // Проверка на команду "назад" или "отмена"
         if (in_array(strtolower($text), ['назад', 'отмена', 'cancel'])) {
             $this->stateManager->clearState($userId);
-            
+
             $this->telegram->sendMessage([
                 'chat_id' => $chatId,
                 'text' => "*❌ Отменено*\n\nВведите новые ингредиенты:",
@@ -331,7 +391,7 @@ class TelegramWebhookController extends Controller
         }
 
         // Парсинг ингредиентов из текста
-        $ingredients = $this->parseIngredients($text);
+        $ingredients = $this->parseProducts($text);
 
         if (empty($ingredients)) {
             $this->telegram->sendMessage([
@@ -478,6 +538,7 @@ class TelegramWebhookController extends Controller
 
         // Отправка задачи в очередь
         GenerateRecipeJob::dispatch(
+            $chatId,
             $userId,
             $state['ingredients'],
             $state['preferences']
@@ -499,7 +560,7 @@ class TelegramWebhookController extends Controller
         if ($currentPage > 1) {
             $row[] = [
                 'text' => '⬅️ Назад',
-                'callback_data' => "history_page:" . ($currentPage - 1),
+                'callback_data' => 'history_page:'.($currentPage - 1),
             ];
         }
 
@@ -507,11 +568,11 @@ class TelegramWebhookController extends Controller
         if ($currentPage < $totalPages) {
             $row[] = [
                 'text' => 'Вперед ➡️',
-                'callback_data' => "history_page:" . ($currentPage + 1),
+                'callback_data' => 'history_page:'.($currentPage + 1),
             ];
         }
 
-        if (!empty($row)) {
+        if (! empty($row)) {
             $keyboard[] = $row;
         }
 
@@ -525,23 +586,39 @@ class TelegramWebhookController extends Controller
      */
     private function parseIngredients(string $text): array
     {
-        // Разделение по запятой, новой строке или пробелу
-        $items = preg_split('/[,\n]+/', $text);
+        return $this->parseProducts($text);
+    }
 
-        $ingredients = [];
+    private function parseProducts(string $text): array
+    {
+        $items = preg_split('/[,\n]+/', $text);
+        $products = [];
 
         foreach ($items as $item) {
             $trimmed = trim($item);
-            
-            // Пропускаем пустые и слишком короткие строки
+
             if (strlen($trimmed) < 2) {
                 continue;
             }
 
-            $ingredients[] = $trimmed;
+            if (preg_match('/^(.+?)\s+(\d+(?:[.,]\d+)?)\s*([[:alpha:]]+|шт|г|кг|мл|л)$/u', $trimmed, $matches)) {
+                $products[] = [
+                    'name' => trim($matches[1]),
+                    'quantity' => (float) str_replace(',', '.', $matches[2]),
+                    'unit' => trim($matches[3]),
+                ];
+
+                continue;
+            }
+
+            $products[] = [
+                'name' => $trimmed,
+                'quantity' => 1,
+                'unit' => 'шт',
+            ];
         }
 
-        return $ingredients;
+        return $products;
     }
 
     /**
@@ -582,7 +659,7 @@ class TelegramWebhookController extends Controller
             $dietary[] = 'low_calorie';
         }
 
-        if (!empty($dietary)) {
+        if (! empty($dietary)) {
             $preferences['dietary'] = $dietary;
         }
 
@@ -596,11 +673,21 @@ class TelegramWebhookController extends Controller
     {
         if ($this->apiClient === null) {
             $this->apiClient = new CoreApiClient(
-                config('services.core_api.base_url', 'http://localhost:8000'),
-                config('services.core_api.key')
+                config('services.core_api.base_url', 'http://localhost:8000')
             );
         }
 
         return $this->apiClient;
+    }
+
+    private function getProductsApiClient(): ProductsApiClient
+    {
+        if ($this->productsApiClient === null) {
+            $this->productsApiClient = new ProductsApiClient(
+                config('services.products_api.base_url', 'http://localhost:8090')
+            );
+        }
+
+        return $this->productsApiClient;
     }
 }

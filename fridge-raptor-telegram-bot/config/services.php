@@ -41,8 +41,11 @@ return [
     |--------------------------------------------------------------------------
     */
     'core_api' => [
-        'base_url' => env('CORE_API_BASE_URL', 'http://localhost:8000/api/v1'),
-        'key' => env('CORE_API_KEY'),
+        'base_url' => env('CORE_API_BASE_URL', 'http://localhost:8000'),
+    ],
+
+    'products_api' => [
+        'base_url' => env('PRODUCTS_API_BASE_URL', 'http://localhost:8090'),
     ],
 
     /*
@@ -52,8 +55,6 @@ return [
     */
     'telegram' => [
         'bot_token' => env('TELEGRAM_BOT_TOKEN'),
-        'webhook_url' => env('TELEGRAM_WEBHOOK_URL'),
-        'webhook_secret' => env('TELEGRAM_WEBHOOK_SECRET'),
     ],
 
 ];

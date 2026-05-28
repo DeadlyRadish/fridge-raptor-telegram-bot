@@ -12,53 +12,38 @@ use RuntimeException;
  */
 class CoreApiClient
 {
-    /**
-     * @var string Базовый URL API
-     */
     private string $baseUrl;
 
     /**
-     * @var string|null API ключ для аутентификации
+     * @param  string  $baseUrl  Базовый URL API
      */
-    private ?string $apiKey;
-
-    /**
-     * @param string $baseUrl Базовый URL API
-     * @param string|null $apiKey API ключ
-     */
-    public function __construct(
-        string $baseUrl,
-        ?string $apiKey = null
-    ) {
+    public function __construct(string $baseUrl)
+    {
         $this->baseUrl = rtrim($baseUrl, '/');
-        $this->apiKey = $apiKey;
     }
 
     /**
      * Генерация нового рецепта через Core API
      *
-     * @param array $ingredients Список ингредиентов
-     * @param array $preferences Предпочтения пользователя
-     * @param string $userId Идентификатор пользователя
+     * @param  array  $products  Список продуктов
+     * @param  array  $preferences  Предпочтения пользователя
+     * @param  int  $userId  Идентификатор пользователя
      * @return array Данные рецепта
+     *
      * @throws RuntimeException При ошибке запроса
      */
     public function generateRecipe(
-        array $ingredients,
-        array $preferences = [],
-        string $userId
+        array $products,
+        array $preferences,
+        int $userId
     ): array {
-        $response = Http::withHeaders([
-            'Accept' => 'application/json',
-            'Content-Type' => 'application/json',
-            'X-API-Key' => $this->apiKey ?? '',
-        ])
-        ->timeout(30)
-        ->post("{$this->baseUrl}/api/v1/recipes/generate", [
-            'ingredients' => $ingredients,
-            'preferences' => $preferences,
-            'user_id' => $userId,
-        ]);
+        $response = Http::acceptJson()
+            ->timeout(30)
+            ->post("{$this->baseUrl}/api/v1/recipes", [
+                'products' => $products,
+                'preferences' => $preferences,
+                'user_id' => $userId,
+            ]);
 
         if ($response->failed()) {
             throw new RuntimeException(
@@ -69,7 +54,7 @@ class CoreApiClient
 
         $data = $response->json();
 
-        if (!isset($data['success']) || !$data['success']) {
+        if (! isset($data['success']) || ! $data['success']) {
             throw new RuntimeException('API вернуло unsuccessful ответ');
         }
 
@@ -77,29 +62,15 @@ class CoreApiClient
     }
 
     /**
-     * Получение истории рецептов пользователя
+     * Получение всех рецептов
      *
-     * @param string $userId Идентификатор пользователя
-     * @param int $page Номер страницы
-     * @param int $perPage Количество записей на странице
-     * @return array История рецептов и пагинация
      * @throws RuntimeException При ошибке запроса
      */
-    public function getRecipeHistory(
-        string $userId,
-        int $page = 1,
-        int $perPage = 5
-    ): array {
-        $response = Http::withHeaders([
-            'Accept' => 'application/json',
-            'X-API-Key' => $this->apiKey ?? '',
-        ])
-        ->timeout(10)
-        ->get("{$this->baseUrl}/api/v1/recipes/history", [
-            'user_id' => $userId,
-            'page' => $page,
-            'per_page' => $perPage,
-        ]);
+    public function getRecipes(): array
+    {
+        $response = Http::acceptJson()
+            ->timeout(10)
+            ->get("{$this->baseUrl}/api/v1/recipes");
 
         if ($response->failed()) {
             throw new RuntimeException(
@@ -110,44 +81,7 @@ class CoreApiClient
 
         $data = $response->json();
 
-        if (!isset($data['success']) || !$data['success']) {
-            throw new RuntimeException('API вернуло unsuccessful ответ');
-        }
-
-        return [
-            'recipes' => $data['data'] ?? [],
-            'pagination' => $data['pagination'] ?? [],
-        ];
-    }
-
-    /**
-     * Получение деталей конкретного рецепта
-     *
-     * @param string $recipeId ID рецепта
-     * @param string $userId Идентификатор пользователя
-     * @return array Данные рецепта
-     * @throws RuntimeException При ошибке запроса
-     */
-    public function getRecipeDetails(string $recipeId, string $userId): array
-    {
-        $response = Http::withHeaders([
-            'Accept' => 'application/json',
-            'X-API-Key' => $this->apiKey ?? '',
-            'X-User-ID' => $userId,
-        ])
-        ->timeout(10)
-        ->get("{$this->baseUrl}/api/v1/recipes/{$recipeId}");
-
-        if ($response->failed()) {
-            throw new RuntimeException(
-                "Ошибка получения рецепта: {$response->status()}",
-                $response->status()
-            );
-        }
-
-        $data = $response->json();
-
-        if (!isset($data['success']) || !$data['success']) {
+        if (! isset($data['success']) || ! $data['success']) {
             throw new RuntimeException('API вернуло unsuccessful ответ');
         }
 
@@ -155,22 +89,41 @@ class CoreApiClient
     }
 
     /**
-     * Удаление рецепта
+     * Проверка доступности Core API
      *
-     * @param string $recipeId ID рецепта
-     * @param string $userId Идентификатор пользователя
-     * @return bool Успешность удаления
+     * @return array Данные healthcheck
+     *
      * @throws RuntimeException При ошибке запроса
      */
-    public function deleteRecipe(string $recipeId, string $userId): bool
+    public function checkHealth(): array
     {
-        $response = Http::withHeaders([
-            'Accept' => 'application/json',
-            'X-API-Key' => $this->apiKey ?? '',
-            'X-User-ID' => $userId,
-        ])
-        ->timeout(10)
-        ->delete("{$this->baseUrl}/api/v1/recipes/{$recipeId}");
+        $response = Http::acceptJson()
+            ->timeout(10)
+            ->get("{$this->baseUrl}/api/health");
+
+        if ($response->failed()) {
+            throw new RuntimeException(
+                "Ошибка health check: {$response->status()}",
+                $response->status()
+            );
+        }
+
+        return $response->json();
+    }
+
+    /**
+     * Удаление рецепта
+     *
+     * @param  int  $recipeId  ID рецепта
+     * @return bool Успешность удаления
+     *
+     * @throws RuntimeException При ошибке запроса
+     */
+    public function deleteRecipe(int $recipeId): bool
+    {
+        $response = Http::acceptJson()
+            ->timeout(10)
+            ->delete("{$this->baseUrl}/api/v1/recipes/{$recipeId}");
 
         if ($response->failed()) {
             throw new RuntimeException(
@@ -179,8 +132,6 @@ class CoreApiClient
             );
         }
 
-        $data = $response->json();
-
-        return isset($data['success']) && $data['success'];
+        return $response->successful();
     }
 }
