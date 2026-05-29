@@ -65,18 +65,26 @@ class TelegramWebhookController extends Controller
     {
         try {
             $payload = $request->all();
+    
+            Log::debug('Контроллер получил запрос', [
+                'payload_empty' => empty($payload),
+                'payload_keys'  => array_keys($payload),
+                'raw_content'   => $request->getContent(),
+                'update_id'     => $payload['update_id'] ?? 'ОТСУТСТВУЕТ',
+                'has_message'   => isset($payload['message']),
+            ]);
+    
             $update = $payload !== []
                 ? new Update($payload)
                 : $this->telegram->getWebhookUpdate();
-
+    
             Log::info('Получен webhook от Telegram', [
-                'update_id' => $update->getId(),
+                'update_id' => $update->getUpdateId(),
+                'has_message' => $update->hasMessage(),
             ]);
 
             // Игнорируем сообщения от ботов
-            if ($update->getMessage()?->getFrom()?->getIsBot()) {
-                return response()->json(['success' => true]);
-            }
+            
 
             // Обработка команд
             if ($update->hasMessage() && $update->getMessage()->hasEntities()) {
@@ -690,4 +698,84 @@ class TelegramWebhookController extends Controller
 
         return $this->productsApiClient;
     }
+
+    public function handleUpdate(Update $update): void
+{
+    try {
+        Log::info('Обработка апдейта', [
+            'update_id' => $update->getUpdateId(),
+            'type'      => $update->detectType(),
+        ]);
+
+        $type = $update->detectType();
+
+        if ($type === 'message') {
+            $message = $update->getMessage();
+            $from = $message->get('from');
+
+            // Игнорируем ботов
+            if (data_get($from, 'is_bot')) {
+                return;
+            }
+
+            $chatId = data_get($message, 'chat.id');
+            $userId = (string) data_get($from, 'id');
+            $userName = data_get($from, 'first_name', '');
+            $text = data_get($message, 'text', '');
+            $entities = data_get($message, 'entities', []);
+
+            // Проверяем команду
+            foreach ($entities as $entity) {
+                $entityType = is_array($entity) ? ($entity['type'] ?? '') : $entity->get('type');
+                if ($entityType === 'bot_command') {
+                    $offset = is_array($entity) ? ($entity['offset'] ?? 0) : $entity->get('offset');
+                    $length = is_array($entity) ? ($entity['length'] ?? 0) : $entity->get('length');
+                    $command = strtolower(str_replace('/', '', mb_substr($text, $offset, $length)));
+
+                    Log::info("Команда {$command} от {$userId}");
+
+                    match ($command) {
+                        'start'    => $this->handleStartCommand($chatId, $userId, $userName),
+                        'help'     => $this->handleHelpCommand($chatId),
+                        'history'  => $this->handleHistoryCommand($chatId, $userId),
+                        'cancel'   => $this->handleCancelCommand($chatId, $userId),
+                        'products' => $this->handleProductsCommand($chatId, $userId),
+                        'cook'     => $this->handleCookFromProductsCommand($chatId, $userId),
+                        default    => null,
+                    };
+                    return;
+                }
+            }
+
+            // Текстовое сообщение
+            if ($text !== '') {
+                $state = $this->stateManager->getState($userId);
+                match ($state['state']) {
+                    UserStateManager::STATE_WAITING_INGREDIENTS    => $this->handleIngredientsInput($chatId, $userId, $text),
+                    UserStateManager::STATE_CLARIFYING_PARAMETERS  => $this->handleParametersInput($chatId, $userId, $text),
+                    default                                        => $this->handleDefaultMessage($chatId, $userId, $text),
+                };
+            }
+
+        } elseif ($type === 'callback_query') {
+            $callback = $update->getCallbackQuery();
+            $chatId   = data_get($callback, 'message.chat.id');
+            $userId   = (string) data_get($callback, 'from.id');
+            $data     = data_get($callback, 'data', '');
+
+            [$action, $param] = explode(':', $data . ':');
+            match ($action) {
+                'history_page'  => $this->handleHistoryPagination($chatId, $userId, (int) $param),
+                'recipe_action' => $this->handleRecipeAction($chatId, $userId, $param),
+                default         => null,
+            };
+        }
+
+    } catch (\Throwable $e) {
+        Log::error('Ошибка обработки апдейта', [
+            'error' => $e->getMessage(),
+            'trace' => $e->getTraceAsString(),
+        ]);
+    }
+}
 }

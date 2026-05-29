@@ -74,10 +74,16 @@ class RunTelegramPollingCommand extends Command
                 }
 
                 foreach (($payload['result'] ?? []) as $updateData) {
-                    $update = new Update($updateData);
+                    $update = new Update(collect($updateData));
                     $offset = ((int) $update->getUpdateId()) + 1;
-                    $request = Request::create('/webhook/telegram', 'POST', $update->toArray());
-                    $controller->handle($request);
+                
+                    Log::debug('Получен апдейт', [
+                        'update_id'   => $update->getUpdateId(),
+                        'has_message' => $update->hasMessage(),
+                        'text'        => $update->getMessage()?->getText(),
+                    ]);
+                
+                    $controller->handleUpdate($update);
                 }
             } catch (ConnectionException $e) {
                 Log::error('Ошибка long polling: Telegram connection issue', ['error' => $e->getMessage()]);
